@@ -3,10 +3,13 @@ name = "nanochat"
 version = "0.1.0"
 description = "the minimal full-stack ChatGPT clone"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "datasets>=4.0.0",
     "fastapi>=0.117.1",
+    "flax>=0.12.3",
+    "jax>=0.9.0",
+    "optax>=0.2.6",
     "ipykernel>=7.1.0",
     "kernels>=0.11.7",
     "matplotlib>=3.10.8",
@@ -40,35 +43,16 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 
-# target torch to cuda 12.8 or CPU
-[tool.uv.sources]
-torch = [
-    { index = "pytorch-cpu", extra = "cpu" },
-    { index = "pytorch-cu128", extra = "gpu" },
+# GPU support via optional extra: uv sync --extra gpu
+[project.optional-dependencies]
+gpu = [
+    "jax[cuda12]>=0.9.0",
 ]
 
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
+[tool.uv.sources]
+torch = { index = "pytorch-cu128", extra = "gpu" }
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
-
-[project.optional-dependencies]
-cpu = [
-    "torch>=2.9.1",
-]
-gpu = [
-    "torch>=2.9.1",
-]
-
-[tool.uv]
-conflicts = [
-    [
-        { extra = "cpu" },
-        { extra = "gpu" },
-    ],
-]

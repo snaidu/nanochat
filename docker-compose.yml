@@ -1,0 +1,28 @@
+services:
+  dev:
+    build: .
+    environment:
+      - PATH=/opt/venv/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin
+    volumes:
+      - .:/workspace
+      - uv-cache:/root/.cache/uv
+      - ~/.ssh:/root/.ssh:ro
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    command: /bin/bash
+
+  jupyter:
+    build: .
+    environment:
+      - PATH=/opt/venv/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin
+    volumes:
+      - .:/workspace
+      - uv-cache:/root/.cache/uv
+    working_dir: /workspace
+    ports:
+      - "8080:8888"
+    command: jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
+
+volumes:
+  uv-cache:
