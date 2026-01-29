@@ -24,6 +24,9 @@ RUN uv python install && \
 
 RUN uv tool install jupyterlab
 
+# Register the venv Python as a Jupyter kernel
+RUN /opt/venv/bin/python -m ipykernel install --name=nanochat --display-name="Python (nanochat)"
+
 WORKDIR /workspace
 ENV PATH="/root/.local/share/uv/tools/jupyterlab/bin:/root/.local/bin:/opt/venv/bin:$PATH"
 ENV VIRTUAL_ENV="/opt/venv"
