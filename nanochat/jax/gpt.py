@@ -148,7 +148,7 @@ class GPT(nnx.Module):
         softcap = 15.0
         logits = self.lm_head(x)
         logits = logits[..., :self.config.vocab_size]
-        logits = logits.view(jnp.float32)
+        logits = jnp.astype(logits, jnp.float32)
         logits = softcap * lax.tanh(logits / softcap)
         if targets is not None:
             targets = targets.reshape(-1)
