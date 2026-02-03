@@ -10,9 +10,9 @@ python -m scripts.jax.base_train --multi-device
 Example for quick testing on CPU:
 python -m scripts.jax.base_train --depth=4 --max-seq-len=512 --device-batch-size=2 --num-iterations=100 --eval-every=50
 
-NOTE: Requires dataset to be prepared first. Run:
-  python -m nanochat.dataset
-  python -m nanochat.tokenizer
+NOTE: Requires dataset and tokenizer to be prepared first. Run:
+  python -m nanochat.dataset -n 10  # download at least a few shards
+  python -m scripts.tok_train       # train the tokenizer
 """
 
 import argparse
@@ -83,9 +83,9 @@ dtype = jnp.bfloat16 if args.dtype == "bfloat16" else jnp.float32
 base_dir = get_base_dir()
 tokenizer_path = os.path.join(base_dir, "tokenizer", "tokenizer.pkl")
 if not os.path.exists(tokenizer_path):
-    print("ERROR: Tokenizer not found. Please prepare the data first:")
-    print("  python -m nanochat.dataset")
-    print("  python -m nanochat.tokenizer")
+    print("ERROR: Tokenizer not found. Please prepare the data and tokenizer first:")
+    print("  python -m nanochat.dataset -n 10  # download at least a few shards")
+    print("  python -m scripts.tok_train       # train the tokenizer")
     sys.exit(1)
 
 from nanochat.tokenizer import get_tokenizer
@@ -173,7 +173,7 @@ def train_step(model: GPT, optimizer: nnx.Optimizer, x: jax.Array, y: jax.Array)
     """Single training step."""
     grad_fn = nnx.value_and_grad(loss_fn)
     loss, grads = grad_fn(model, x, y)
-    optimizer.update(grads)
+    optimizer.update(model, grads)  # Flax 0.11+ requires (model, grads)
     return loss
 
 # Multi-device training with data parallelism
@@ -202,7 +202,7 @@ if args.multi_device and num_devices > 1:
             loss, grads = grad_fn(model, x, y)
             # Average gradients across devices
             grads = jax.lax.pmean(grads, axis_name='data')
-        optimizer.update(grads)
+        optimizer.update(model, grads)  # Flax 0.11+ requires (model, grads)
         return loss
 
     print(f"Using mesh: {mesh} for data parallel training")
