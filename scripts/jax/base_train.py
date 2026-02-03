@@ -16,9 +16,11 @@ NOTE: Requires dataset and tokenizer to be prepared first. Run:
 """
 
 import argparse
+import json
 import os
 import sys
 import time
+from datetime import datetime
 from functools import partial
 
 import jax
@@ -55,6 +57,8 @@ parser.add_argument("--multi-device", action="store_true", help="enable multi-de
 # Misc
 parser.add_argument("--seed", type=int, default=42, help="random seed")
 parser.add_argument("--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"], help="compute dtype")
+# Output
+parser.add_argument("--output-dir", type=str, default=None, help="directory to save model and logs (default: jax_checkpoints/<run>)")
 args = parser.parse_args()
 
 # -----------------------------------------------------------------------------
@@ -134,6 +138,16 @@ def count_params(model):
 
 num_params = count_params(model)
 print(f"Number of parameters: {num_params:,}")
+
+# -----------------------------------------------------------------------------
+# Output directory setup
+
+if args.output_dir is None:
+    output_dir = os.path.join(base_dir, "jax_checkpoints", args.run)
+else:
+    output_dir = args.output_dir
+os.makedirs(output_dir, exist_ok=True)
+print(f"Output directory: {output_dir}")
 
 # -----------------------------------------------------------------------------
 # Optimizer with learning rate schedule
@@ -252,6 +266,11 @@ best_val_loss = float('inf')
 total_tokens = 0
 start_time = time.time()
 
+# History tracking for logging
+train_loss_history = []  # (step, loss)
+val_loss_history = []    # (step, loss)
+step_times = []          # time per step (excluding first few warmup steps)
+
 for step in range(args.num_iterations + 1):
     # Evaluation
     if args.eval_every > 0 and (step % args.eval_every == 0 or step == args.num_iterations):
@@ -263,6 +282,7 @@ for step in range(args.num_iterations + 1):
             val_loss = eval_step(model, x, y)
             val_losses.append(float(val_loss))
         avg_val_loss = sum(val_losses) / len(val_losses)
+        val_loss_history.append({"step": int(step), "loss": float(avg_val_loss)})
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
         print(f"Step {step:5d} | Val loss: {avg_val_loss:.4f} | Best: {best_val_loss:.4f}")
@@ -287,6 +307,13 @@ for step in range(args.num_iterations + 1):
     t1 = time.time()
     dt = t1 - t0
 
+    # Track step time (skip first 10 steps for JIT warmup)
+    if step >= 10:
+        step_times.append(dt)
+
+    # Track training loss
+    train_loss_history.append({"step": int(step), "loss": float(loss)})
+
     # Update metrics
     total_tokens += args.device_batch_size * args.max_seq_len
     tokens_per_sec = args.device_batch_size * args.max_seq_len / dt
@@ -301,7 +328,76 @@ for step in range(args.num_iterations + 1):
 
 # Final stats
 elapsed = time.time() - start_time
+avg_step_time = sum(step_times) / len(step_times) if step_times else 0
+
 print(f"\nTraining complete!")
 print(f"Total time: {elapsed/60:.2f} minutes")
+print(f"Average step time: {avg_step_time*1000:.2f} ms")
 print(f"Total tokens: {total_tokens:,}")
 print(f"Best validation loss: {best_val_loss:.4f}")
+
+# -----------------------------------------------------------------------------
+# Save model and logs
+
+# Save model state
+model_path = os.path.join(output_dir, "model.ckpt")
+print(f"Saving model to {model_path}...")
+state = nnx.state(model)
+with open(model_path, "wb") as f:
+    f.write(nnx.serialization.to_bytes(state))
+print(f"Model saved.")
+
+# Save training log as JSON
+log_data = {
+    "config": {
+        "run": args.run,
+        "depth": args.depth,
+        "aspect_ratio": args.aspect_ratio,
+        "head_dim": args.head_dim,
+        "max_seq_len": args.max_seq_len,
+        "num_iterations": args.num_iterations,
+        "device_batch_size": args.device_batch_size,
+        "learning_rate": args.learning_rate,
+        "warmup_steps": args.warmup_steps,
+        "weight_decay": args.weight_decay,
+        "seed": args.seed,
+        "dtype": args.dtype,
+        "multi_device": args.multi_device,
+    },
+    "model": {
+        "num_layers": num_layers,
+        "model_dim": model_dim,
+        "num_heads": num_heads,
+        "head_dim": head_dim,
+        "vocab_size": vocab_size,
+        "num_params": num_params,
+    },
+    "training": {
+        "num_devices": num_devices,
+        "tokens_per_step": args.device_batch_size * args.max_seq_len,
+        "total_tokens": total_tokens,
+        "total_steps": args.num_iterations,
+        "final_epoch": dataloader_state["epoch"],
+    },
+    "timing": {
+        "start_time": datetime.fromtimestamp(start_time).isoformat(),
+        "total_time_seconds": elapsed,
+        "total_time_minutes": elapsed / 60,
+        "avg_step_time_ms": avg_step_time * 1000,
+        "tokens_per_second": total_tokens / elapsed if elapsed > 0 else 0,
+    },
+    "results": {
+        "best_val_loss": float(best_val_loss) if best_val_loss != float('inf') else None,
+        "final_train_loss": float(train_loss_history[-1]["loss"]) if train_loss_history else None,
+        "final_val_loss": float(val_loss_history[-1]["loss"]) if val_loss_history else None,
+    },
+    "history": {
+        "train_loss": train_loss_history,
+        "val_loss": val_loss_history,
+    },
+}
+
+log_path = os.path.join(output_dir, "training_log.json")
+with open(log_path, "w") as f:
+    json.dump(log_data, f, indent=2)
+print(f"Training log saved to {log_path}")
