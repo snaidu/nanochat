@@ -48,11 +48,3 @@ python_functions = ["test_*"]
 gpu = [
     "jax[cuda12]>=0.9.0",
 ]
-
-[tool.uv.sources]
-torch = { index = "pytorch-cu128", extra = "gpu" }
-
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
