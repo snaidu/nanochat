@@ -51,7 +51,6 @@ python scripts/jax/base_train.py \
     --learning-rate=3e-4 \
     --weight-decay=0.1 \
     --warmup-steps=100 \
-    --output-dir=./jax_checkpoints/d8_ar64_hd32 \
-    --multi-device
+    --output-dir=./jax_checkpoints/d8_ar64_hd32
 
 echo "=== Training Complete ==="
