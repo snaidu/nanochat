@@ -27,6 +27,7 @@ import optax
 from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
 
 from nanochat.jax.gpt import GPT, GPTJaxConfig
+from nanochat.jax.gpt_poskernel import GPTPosKernel, GPTPosKernelConfig
 from nanochat.common import print_banner, get_base_dir
 
 
@@ -77,6 +78,9 @@ def parse_args():
     # Misc
     parser.add_argument("--seed", type=int, default=42, help="random seed")
     parser.add_argument("--dtype", type=str, default="bfloat16", choices=["float32", "bfloat16"], help="compute dtype")
+    # Model selection
+    parser.add_argument("--model", type=str, default="gpt", choices=["gpt", "gpt_poskernel"],
+                        help="model architecture to train")
     # Output
     parser.add_argument("--output-dir", type=str, default=None, help="directory to save model and logs (default: jax_checkpoints/<run>)")
     return parser.parse_args()
@@ -108,29 +112,43 @@ def create_model(args, vocab_size):
     num_kv_heads = num_heads
     head_dim = model_dim // num_heads
 
+    print(f"Model: {args.model}")
     print(f"Model config:")
     print(f"  num_layers: {num_layers}")
     print(f"  model_dim: {model_dim}")
     print(f"  num_heads: {num_heads}")
     print(f"  head_dim: {head_dim}")
 
-    config = GPTJaxConfig(
-        sequence_len=args.max_seq_len,
-        vocab_size=vocab_size,
-        n_layer=num_layers,
-        n_head=num_heads,
-        n_kv_head=num_kv_heads,
-        n_embd=model_dim,
-        dtype=dtype,
-    )
-
     rngs = nnx.Rngs(args.seed)
-    model = GPT(config, rngs=rngs)
+
+    if args.model == "gpt_poskernel":
+        config = GPTPosKernelConfig(
+            sequence_len=args.max_seq_len,
+            vocab_size=vocab_size,
+            n_layer=num_layers,
+            n_head=num_heads,
+            n_kv_head=num_kv_heads,
+            n_embd=model_dim,
+            dtype=dtype,
+        )
+        model = GPTPosKernel(config, rngs=rngs)
+    else:
+        config = GPTJaxConfig(
+            sequence_len=args.max_seq_len,
+            vocab_size=vocab_size,
+            n_layer=num_layers,
+            n_head=num_heads,
+            n_kv_head=num_kv_heads,
+            n_embd=model_dim,
+            dtype=dtype,
+        )
+        model = GPT(config, rngs=rngs)
 
     num_params = count_params(model)
     print(f"Number of parameters: {num_params:,}")
 
     model_info = {
+        "model": args.model,
         "num_layers": num_layers,
         "model_dim": model_dim,
         "num_heads": num_heads,
@@ -311,6 +329,7 @@ def train_model(args, mesh):
     # Save
     log_data = {
         "config": {
+            "model": args.model,
             "run": args.run,
             "depth": args.depth,
             "aspect_ratio": args.aspect_ratio,
