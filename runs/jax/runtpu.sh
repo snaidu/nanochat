@@ -8,6 +8,11 @@
 
 set -e  # Exit on error
 
+if [ ! -d /mnt/disks/training-data/nanochat ]; then
+    sudo mkdir -p /mnt/disks/training-data
+    sudo mount -o discard,defaults,noload /dev/sdb /mnt/disks/training-data
+fi
+
 echo "=== Nanochat JAX TPU Training Setup ==="
 
 # Environment setup
@@ -22,6 +27,9 @@ fi
 
 # Create venv and install dependencies with TPU support
 echo "Installing dependencies..."
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+export PYTHONPATH="$(pwd)"
+
 uv sync --extra tpu
 source .venv/bin/activate
 pip install tpu-info
