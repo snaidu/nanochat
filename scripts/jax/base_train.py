@@ -22,7 +22,7 @@ import time
 from datetime import datetime
 import jax
 import jax.numpy as jnp
-from flax import nnx
+from flax import nnx, serialization
 import optax
 from jax.sharding import Mesh, PartitionSpec as P, NamedSharding
 
@@ -192,7 +192,7 @@ def save_checkpoint(model, output_dir, log_data):
     print(f"Saving model to {model_path}...")
     state = nnx.state(model)
     with open(model_path, "wb") as f:
-        f.write(nnx.serialization.to_bytes(state))
+        f.write(serialization.to_bytes(state.to_pure_dict()))
     print(f"Model saved.")
 
     log_path = os.path.join(output_dir, "training_log.json")
