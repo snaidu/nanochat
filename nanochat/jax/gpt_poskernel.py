@@ -208,24 +208,13 @@ class PositionalKernelAttention(nnx.Module):
         P_table = self.P[...]   # [H, table_size, D]
         sigma = self.sigma[...] # [H]
 
-        if jax.devices()[0].platform == 'tpu':
-            # Fused tiled kernel: avoids materializing [H, T, T, D] P_interp
-            y = poskernel_flash_attention(
-                q, k, v, P_table, sigma,
-                self.s_max, True, None,
-            )
-        else:
-            # Naive fallback for CPU/GPU (materializes full P_interp)
-            P_interp = self._compute_warped_kernel(T)
-
-            S = jnp.einsum('bhid,hijd,bhjd->bhij', q, P_interp, k)
-            S = S / jnp.sqrt(float(D))
-
-            causal_mask = jnp.tril(jnp.ones((T, T), dtype=jnp.bool_))
-            S = jnp.where(causal_mask[None, None, :, :], S, jnp.finfo(S.dtype).min)
-
-            A = jax.nn.softmax(S, axis=-1)
-            y = A @ v  # [B, H, T, D]
+        # Fast naive forward + memory-efficient chunked backward via custom_vjp.
+        # P_interp is a temporary in the forward (freed after use); the backward
+        # recomputes it per tile from the small P_table + sigma.
+        y = poskernel_flash_attention(
+            q, k, v, P_table, sigma,
+            self.s_max, True, None,
+        )
 
         y = y.transpose(0, 2, 1, 3).reshape(B, T, -1)  # [B, T, C]
         return self.c_proj(y)
