@@ -12,6 +12,7 @@ Only O, l, m (O(T) per head) are saved as forward residuals.
 """
 
 import functools
+import math
 
 import jax
 import jax.numpy as jnp
@@ -63,7 +64,7 @@ def _compute_tile_P_interp(q_pos, k_pos, P_table, sigma_h, s_max):
 # Forward: chunked pure-JAX (works on all platforms)
 # ---------------------------------------------------------------------------
 
-def _forward_chunked(q, k, v, P_table, sigma, s_max, causal, sm_scale,
+def _forward_chunked(q, k, v, P_table, sigma, s_max, causal,
                      block_q, block_k):
     """Flash-attention-style forward with online softmax, processing tiles.
 
@@ -76,7 +77,6 @@ def _forward_chunked(q, k, v, P_table, sigma, s_max, causal, sm_scale,
         sigma: [H]
         s_max: int
         causal: bool
-        sm_scale: float
         block_q, block_k: tile sizes
 
     Returns:
@@ -85,6 +85,7 @@ def _forward_chunked(q, k, v, P_table, sigma, s_max, causal, sm_scale,
         m: [B, H, T] (running max)
     """
     B, H, T, D = q.shape
+    sm_scale = 1.0 / math.sqrt(D)
     n_q_blocks = T // block_q
     n_k_blocks = T // block_k
 
@@ -177,7 +178,7 @@ def _forward_chunked(q, k, v, P_table, sigma, s_max, causal, sm_scale,
 # ---------------------------------------------------------------------------
 
 def _backward_chunked(q, k, v, P_table, sigma, o, l, m, do,
-                      s_max, causal, sm_scale, block_q, block_k):
+                      s_max, causal, block_q, block_k):
     """Chunked backward pass for positional kernel attention.
 
     Recomputes P_interp per tile from P_table + sigma. No T×T materialization.
@@ -190,7 +191,7 @@ def _backward_chunked(q, k, v, P_table, sigma, o, l, m, do,
         l: [B, H, T] (softmax denominators from forward)
         m: [B, H, T] (row maxima from forward)
         do: [B, H, T, D] (upstream gradient)
-        s_max, causal, sm_scale: forward hyperparams
+        s_max, causal: forward hyperparams
         block_q, block_k: tile sizes
 
     Returns:
@@ -199,6 +200,7 @@ def _backward_chunked(q, k, v, P_table, sigma, o, l, m, do,
         dsigma: [H]
     """
     B, H, T, D = q.shape
+    sm_scale = 1.0 / math.sqrt(D)
     table_size = 2 * s_max + 1
     n_q_blocks = T // block_q
     n_k_blocks = T // block_k
@@ -403,14 +405,14 @@ def _default_block_sizes(T):
         return (128, 128)
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7))
 def poskernel_flash_attention(q, k, v, P_table, sigma,
-                               s_max, causal, sm_scale, block_sizes):
+                               s_max, causal, block_sizes):
     """Positional-kernel attention with flash-attention-style tiling.
 
     Avoids materializing the full [H, T, T, D] P_interp tensor or the
     full [B, H, T, T] attention matrix. Peak memory is O(block_q * block_k * D)
-    per tile.
+    per tile. Scale factor (1/sqrt(D)) is computed internally from q.shape.
 
     Args:
         q: [B, H, T, D]
@@ -420,37 +422,36 @@ def poskernel_flash_attention(q, k, v, P_table, sigma,
         sigma: [H]
         s_max: int
         causal: bool
-        sm_scale: float (typically 1/sqrt(D))
         block_sizes: tuple (block_q, block_k) or None for auto
 
     Returns:
         o: [B, H, T, D]
     """
     block_q, block_k = block_sizes if block_sizes else _default_block_sizes(q.shape[2])
-    o, _, _ = _forward_chunked(q, k, v, P_table, sigma, s_max, causal, sm_scale,
+    o, _, _ = _forward_chunked(q, k, v, P_table, sigma, s_max, causal,
                                 block_q, block_k)
     return o.astype(q.dtype)
 
 
-def _poskernel_fwd(q, k, v, P_table, sigma, s_max, causal, sm_scale, block_sizes):
+def _poskernel_fwd(q, k, v, P_table, sigma, s_max, causal, block_sizes):
     """Forward pass for custom_vjp: returns output + residuals."""
     block_q, block_k = block_sizes if block_sizes else _default_block_sizes(q.shape[2])
     o, l, m_val = _forward_chunked(q, k, v, P_table, sigma, s_max, causal,
-                                    sm_scale, block_q, block_k)
+                                    block_q, block_k)
     o_out = o.astype(q.dtype)
     # Save residuals: no T×T tensors, just O(T) per head + references to inputs
     residuals = (q, k, v, P_table, sigma, o, l, m_val)
     return o_out, residuals
 
 
-def _poskernel_bwd(s_max, causal, sm_scale, block_sizes, residuals, do):
+def _poskernel_bwd(s_max, causal, block_sizes, residuals, do):
     """Backward pass for custom_vjp."""
     q, k, v, P_table, sigma, o, l, m_val = residuals
     block_q, block_k = block_sizes if block_sizes else _default_block_sizes(q.shape[2])
 
     dq, dk, dv, dP_table, dsigma = _backward_chunked(
         q, k, v, P_table, sigma, o, l, m_val, do,
-        s_max, causal, sm_scale, block_q, block_k
+        s_max, causal, block_q, block_k
     )
 
     return dq.astype(q.dtype), dk.astype(k.dtype), dv.astype(v.dtype), \
@@ -464,7 +465,7 @@ poskernel_flash_attention.defvjp(_poskernel_fwd, _poskernel_bwd)
 # Naive reference implementation (for testing)
 # ---------------------------------------------------------------------------
 
-def _naive_poskernel_attention(q, k, v, P_table, sigma, s_max, causal, sm_scale):
+def _naive_poskernel_attention(q, k, v, P_table, sigma, s_max, causal):
     """Full-materialization reference. Only for testing small sizes.
 
     Args:
@@ -476,6 +477,7 @@ def _naive_poskernel_attention(q, k, v, P_table, sigma, s_max, causal, sm_scale)
         o: [B, H, T, D]
     """
     B, H, T, D = q.shape
+    sm_scale = 1.0 / math.sqrt(D)
 
     positions = jnp.arange(T)
     delta = positions[:, None] - positions[None, :]  # [T, T]
@@ -522,7 +524,6 @@ def _test_numerical_equivalence():
 
     B, H, T, D = 2, 4, 64, 32
     s_max = 16
-    sm_scale = 1.0 / (D ** 0.5)
 
     key = jax.random.PRNGKey(42)
     keys = jax.random.split(key, 5)
@@ -533,15 +534,15 @@ def _test_numerical_equivalence():
     sigma = jax.random.uniform(keys[4], (H,), minval=10.0, maxval=100.0)
 
     # Naive reference
-    o_naive = _naive_poskernel_attention(q, k, v, P_table, sigma, s_max, True, sm_scale)
+    o_naive = _naive_poskernel_attention(q, k, v, P_table, sigma, s_max, True)
 
     # Chunked (via public API)
     o_chunked = poskernel_flash_attention(q, k, v, P_table, sigma,
-                                          s_max, True, sm_scale, (T, T))
+                                          s_max, True, (T, T))
 
     # Also test with actual tiling
     o_tiled = poskernel_flash_attention(q, k, v, P_table, sigma,
-                                        s_max, True, sm_scale, (16, 16))
+                                        s_max, True, (16, 16))
 
     diff_chunked = jnp.abs(o_naive - o_chunked).max()
     diff_tiled = jnp.abs(o_naive - o_tiled).max()
@@ -560,7 +561,6 @@ def _test_gradients():
 
     B, H, T, D = 1, 2, 32, 16
     s_max = 8
-    sm_scale = 1.0 / (D ** 0.5)
 
     key = jax.random.PRNGKey(123)
     keys = jax.random.split(key, 5)
@@ -572,11 +572,11 @@ def _test_gradients():
 
     def loss_custom(q, k, v, P_table, sigma):
         o = poskernel_flash_attention(q, k, v, P_table, sigma,
-                                      s_max, True, sm_scale, (T, T))
+                                      s_max, True, (T, T))
         return o.sum()
 
     def loss_naive(q, k, v, P_table, sigma):
-        o = _naive_poskernel_attention(q, k, v, P_table, sigma, s_max, True, sm_scale)
+        o = _naive_poskernel_attention(q, k, v, P_table, sigma, s_max, True)
         return o.sum()
 
     grads_custom = jax.grad(loss_custom, argnums=(0, 1, 2, 3, 4))(

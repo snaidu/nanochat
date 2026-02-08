@@ -207,20 +207,19 @@ class PositionalKernelAttention(nnx.Module):
 
         P_table = self.P[...]   # [H, table_size, D]
         sigma = self.sigma[...] # [H]
-        sm_scale = 1.0 / jnp.sqrt(float(D))
 
         if jax.devices()[0].platform == 'tpu':
             # Fused tiled kernel: avoids materializing [H, T, T, D] P_interp
             y = poskernel_flash_attention(
                 q, k, v, P_table, sigma,
-                self.s_max, True, sm_scale, None,
+                self.s_max, True, None,
             )
         else:
             # Naive fallback for CPU/GPU (materializes full P_interp)
             P_interp = self._compute_warped_kernel(T)
 
             S = jnp.einsum('bhid,hijd,bhjd->bhij', q, P_interp, k)
-            S = S * sm_scale
+            S = S / jnp.sqrt(float(D))
 
             causal_mask = jnp.tril(jnp.ones((T, T), dtype=jnp.bool_))
             S = jnp.where(causal_mask[None, None, :, :], S, jnp.finfo(S.dtype).min)
