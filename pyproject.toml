@@ -51,3 +51,12 @@ gpu = [
 tpu = [
     "jax[tpu]>=0.9.0",
 ]
+
+# Always install CPU-only PyTorch (used only for data loading, not GPU compute)
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
