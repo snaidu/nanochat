@@ -30,6 +30,7 @@ from flax import nnx
 import optax
 
 from nanochat.jax.gpt import GPTJaxConfig
+from nanochat.jax.poskernel_attention import poskernel_flash_attention
 
 Array = jax.Array
 
@@ -199,28 +200,35 @@ class PositionalKernelAttention(nnx.Module):
             k = jnp.repeat(k, repeats, axis=2)
             v = jnp.repeat(v, repeats, axis=2)
 
-        # Compute warped positional kernel: [H, T, T, D]
-        P_interp = self._compute_warped_kernel(T)
+        # Rearrange to [B, H, T, D]
+        q = q.transpose(0, 2, 1, 3)
+        k = k.transpose(0, 2, 1, 3)
+        v = v.transpose(0, 2, 1, 3)
 
-        # Attention logits: S[b,h,i,j] = sum_d Q[b,i,h,d] * P[h,i,j,d] * K[b,j,h,d]
-        # Rearrange to [B, H, T, D] for the einsum
-        q = q.transpose(0, 2, 1, 3)  # [B, H, T, D]
-        k = k.transpose(0, 2, 1, 3)  # [B, H, T, D]
-        v = v.transpose(0, 2, 1, 3)  # [B, H, T, D]
+        P_table = self.P[...]   # [H, table_size, D]
+        sigma = self.sigma[...] # [H]
+        sm_scale = 1.0 / jnp.sqrt(float(D))
 
-        S = jnp.einsum('bhid,hijd,bhjd->bhij', q, P_interp, k)
-        S = S / jnp.sqrt(D)
+        if jax.devices()[0].platform == 'tpu':
+            # Fused tiled kernel: avoids materializing [H, T, T, D] P_interp
+            y = poskernel_flash_attention(
+                q, k, v, P_table, sigma,
+                self.s_max, True, sm_scale, None,
+            )
+        else:
+            # Naive fallback for CPU/GPU (materializes full P_interp)
+            P_interp = self._compute_warped_kernel(T)
 
-        # Causal mask
-        causal_mask = jnp.tril(jnp.ones((T, T), dtype=jnp.bool_))
-        S = jnp.where(causal_mask[None, None, :, :], S, jnp.finfo(S.dtype).min)
+            S = jnp.einsum('bhid,hijd,bhjd->bhij', q, P_interp, k)
+            S = S * sm_scale
 
-        A = jax.nn.softmax(S, axis=-1)
+            causal_mask = jnp.tril(jnp.ones((T, T), dtype=jnp.bool_))
+            S = jnp.where(causal_mask[None, None, :, :], S, jnp.finfo(S.dtype).min)
 
-        # Weighted sum: y[b,h,i,d] = sum_j A[b,h,i,j] * V[b,h,j,d]
-        y = A @ v  # [B, H, T, D]
+            A = jax.nn.softmax(S, axis=-1)
+            y = A @ v  # [B, H, T, D]
+
         y = y.transpose(0, 2, 1, 3).reshape(B, T, -1)  # [B, T, C]
-
         return self.c_proj(y)
 
 
